@@ -1,0 +1,16 @@
+{
+  "name": "reminder-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "serve": "pm2 start index.js --name reminder-bot --restart-delay=60000"
+  },
+  "dependencies": {
+    "@dotenvx/dotenvx": "^1.49.0",
+    "chrono-node": "^2.8.4",
+    "node-schedule": "^2.1.1",
+    "pm2": "^6.0.8",
+    "telegraf": "^4.16.3"
+  }
+}
