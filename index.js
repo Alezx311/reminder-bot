@@ -11,6 +11,9 @@ const bot = new Telegraf(process.env.BOT_TOKEN_PROD)
 let reminders = loadReminders()
 let reminderId = reminders.length > 0 ? Math.max(...reminders.map(r => r.id)) + 1 : 1
 
+// Об'єкт для збереження поточних діалогів створення нагадувань
+const creationSessions = new Map()
+
 // Відновлюємо задачі після рестарту
 reminders.forEach(r => {
   try {
@@ -53,14 +56,109 @@ if (activeReminders.length !== reminders.length) {
   logDebug(`Очищено ${reminders.length - activeReminders.length} прострочених нагадувань`)
 }
 
+// Функція для перевірки валідності cron виразу
+function isValidCron(cronExpression) {
+  const cronParts = cronExpression.trim().split(/\s+/)
+
+  if (cronParts.length !== 5) {
+    return false
+  }
+
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = cronParts
+
+  // Базова валідація кожної частини
+  const isValidRange = (value, min, max) => {
+    if (value === '*') return true
+    if (/^\d+$/.test(value)) {
+      const num = parseInt(value)
+      return num >= min && num <= max
+    }
+    if (/^\d+\/\d+$/.test(value)) return true // step values
+    if (/^\d+-\d+$/.test(value)) return true // ranges
+    if (/^(\d+,)*\d+$/.test(value)) return true // lists
+    return false
+  }
+
+  return (
+    isValidRange(minute, 0, 59) &&
+    isValidRange(hour, 0, 23) &&
+    isValidRange(dayOfMonth, 1, 31) &&
+    isValidRange(month, 1, 12) &&
+    isValidRange(dayOfWeek, 0, 7)
+  )
+}
+
+// Функція для пояснення cron виразу українською
+function explainCron(cronExpression) {
+  const [minute, hour, dayOfMonth, month, dayOfWeek] = cronExpression.split(' ')
+
+  let description = '🕒 Розклад: '
+
+  // День місяця
+  if (dayOfMonth !== '*') {
+    if (month !== '*') {
+      const months = [
+        '',
+        'січня',
+        'лютого',
+        'березня',
+        'квітня',
+        'травня',
+        'червня',
+        'липня',
+        'серпня',
+        'вересня',
+        'жовтня',
+        'листопада',
+        'грудня',
+      ]
+      description += `${dayOfMonth} ${months[parseInt(month)]} `
+    } else {
+      description += `щомісяця ${dayOfMonth} числа `
+    }
+  }
+  // День тижня
+  else if (dayOfWeek !== '*') {
+    const days = ['неділі', 'понеділка', 'вівторка', 'середи', 'четверга', "п'ятниці", 'суботи']
+    if (dayOfWeek === '7') dayOfWeek = '0' // Sunday can be 0 or 7
+    description += `щотижня в ${days[parseInt(dayOfWeek)]} `
+  }
+  // Щодня
+  else {
+    description += 'щодня '
+  }
+
+  // Час
+  const hourStr = hour.padStart(2, '0')
+  const minuteStr = minute.padStart(2, '0')
+  description += `о ${hourStr}:${minuteStr}`
+
+  return description
+}
+
+// Функція для скасування поточного діалогу
+function cancelCreationSession(chatId) {
+  if (creationSessions.has(chatId)) {
+    creationSessions.delete(chatId)
+    return true
+  }
+  return false
+}
+
 // Команда /start
 bot.start(ctx => {
+  // Скасовуємо поточний діалог якщо є
+  cancelCreationSession(ctx.chat.id)
+
   ctx.reply(`👋 Привіт! Я бот для нагадувань.
 
-📝 Щоб створити нагадування, напишіть:
+📝 Швидке створення нагадування:
 "зроби нагадування [текст] [час]"
 
-⏰ Приклади:
+🛠 Поетапне створення з cron:
+/create - створити нагадування покроково
+
+⏰ Приклади швидкого створення:
 • "зроби нагадування купити молоко завтра о 10:00"
 • "зроби нагадування зустріч через 2 години"
 • "зроби нагадування прийняти ліки щодня о 8:00"
@@ -68,14 +166,45 @@ bot.start(ctx => {
 • "зроби нагадування кожного 25 числа о 10 ранку"
 • "зроби нагадування кожен понеділок зустріч о 9:30"
 
-🔄 Повторювані нагадування:
-• Щодня: "щодня о 8:00"
-• Щотижня: "кожен понеділок о 10:00"  
-• Щомісяця: "на 15 число о 12:00", "кожного 1 числа о 9:00"
-
 📋 Команди:
 /list - переглянути активні нагадування
-/cancel [номер] - скасувати нагадування`)
+/cancel [номер] - скасувати нагадування
+/create - поетапне створення нагадування
+/stop - зупинити поточний діалог створення`)
+})
+
+// Команда /create для поетапного створення
+bot.command('create', ctx => {
+  const chatId = ctx.chat.id
+
+  // Скасовуємо попередній діалог якщо є
+  cancelCreationSession(chatId)
+
+  // Створюємо новий діалог
+  creationSessions.set(chatId, {
+    step: 'text',
+    data: {},
+  })
+
+  ctx.reply(`🆕 Створення нового нагадування
+
+📝 Крок 1/2: Напишіть текст нагадування
+Що саме нагадати?
+
+💡 Наприклад: "Купити продукти", "Зустріч з лікарем", "Прийняти ліки"
+
+❌ Для скасування використовуйте /stop`)
+})
+
+// Команда /stop для скасування поточного діалогу
+bot.command('stop', ctx => {
+  const chatId = ctx.chat.id
+
+  if (cancelCreationSession(chatId)) {
+    ctx.reply('❌ Створення нагадування скасовано')
+  } else {
+    ctx.reply('ℹ️ Немає активного діалогу створення нагадування')
+  }
 })
 
 // Команда /list показує активні нагадування
@@ -191,15 +320,128 @@ bot.on('callback_query', ctx => {
   }
 })
 
-// Парсимо текстові повідомлення для створення нагадувань
+// Парсимо текстові повідомлення
 bot.on('text', ctx => {
+  const chatId = ctx.chat.id
+  const message = ctx.message.text
+
+  // Перевіряємо, чи є активний діалог створення
+  if (creationSessions.has(chatId)) {
+    const session = creationSessions.get(chatId)
+
+    if (session.step === 'text') {
+      // Зберігаємо текст нагадування
+      session.data.text = message.trim()
+      session.step = 'cron'
+
+      ctx.reply(`✅ Текст нагадування збережено: "${session.data.text}"
+
+⏰ Крок 2/2: Введіть cron вираз для розкладу
+Формат: хвилини години день_місяця місяць день_тижня
+
+📚 Приклади:
+• "0 9 * * *" - щодня о 9:00
+• "30 8 * * 1" - щопонеділка о 8:30
+• "0 12 1 * *" - 1 числа кожного місяця о 12:00
+• "0 18 * * 1-5" - по будням о 18:00
+• "0 10 */3 * *" - кожні 3 дні о 10:00
+
+💡 Використовуйте:
+• * - будь-яке значення
+• числа - конкретні значення  
+• діапазони (1-5)
+• списки (1,3,5)
+• кроки (*/2)
+
+❌ Для скасування використовуйте /stop`)
+
+      creationSessions.set(chatId, session)
+      return
+    }
+
+    if (session.step === 'cron') {
+      const cronExpression = message.trim()
+
+      // Перевіряємо валідність cron виразу
+      if (!isValidCron(cronExpression)) {
+        return ctx.reply(`❌ Невірний формат cron виразу!
+
+📋 Правильний формат: хвилини години день_місяця місяць день_тижня
+Приклад: "0 9 * * *" (щодня о 9:00)
+
+🔢 Допустимі значення:
+• Хвилини: 0-59
+• Години: 0-23  
+• День місяця: 1-31
+• Місяць: 1-12
+• День тижня: 0-7 (0 та 7 = неділя)
+
+Спробуйте ще раз або використовуйте /stop для скасування`)
+      }
+
+      // Створюємо нагадування
+      try {
+        const author = ctx.from.username
+          ? '@' + ctx.from.username
+          : `${ctx.from.first_name} ${ctx.from.last_name || ''}`.trim()
+
+        // Створюємо job
+        const job = schedule.scheduleJob(cronExpression, () => {
+          bot.telegram
+            .sendMessage(chatId, `🔔 Повторюване нагадування: ${session.data.text}\n👤 Від: ${author}`)
+            .catch(err => logDebug(`Помилка надсилання повторюваного нагадування #${reminderId}: ${err.message}`))
+        })
+
+        // Створюємо запис нагадування
+        const record = {
+          id: reminderId,
+          chatId,
+          text: session.data.text,
+          cron: cronExpression,
+          author,
+          job,
+          repeat: true,
+        }
+
+        reminders.push(record)
+        saveReminders(reminders)
+
+        // Пояснюємо розклад
+        const scheduleDescription = explainCron(cronExpression)
+
+        ctx.reply(`✅ Нагадування #${reminderId} успішно створено!
+
+📌 Текст: ${session.data.text}
+${scheduleDescription}
+🤖 Cron: ${cronExpression}
+👤 Автор: ${author}
+
+📋 Переглянути всі нагадування: /list`)
+
+        logDebug(`Створено повторюване нагадування #${reminderId} з cron: ${cronExpression}`)
+
+        // Завершуємо діалог
+        creationSessions.delete(chatId)
+        reminderId++
+      } catch (error) {
+        logDebug(`Помилка створення cron нагадування: ${error.message}`)
+        ctx.reply(`❌ Помилка створення нагадування: ${error.message}
+
+Спробуйте ще раз або використовуйте /stop для скасування`)
+      }
+
+      return
+    }
+  }
+
+  // Стандартна обробка швидких нагадувань
   const rxp = /зроби нагадування/gi
-  const message = ctx.message.text.toLowerCase()
+  const messageText = message.toLowerCase()
 
   // Пропускаємо команди та згадування
-  if (message.startsWith('/') || message.includes('@')) return
+  if (messageText.startsWith('/') || messageText.includes('@')) return
 
-  if (rxp.test(message)) {
+  if (rxp.test(messageText)) {
     try {
       let cron = null
       let when = null
@@ -211,7 +453,7 @@ bot.on('text', ctx => {
       // Перевіряємо на повторювані нагадування
       const isRepeating =
         /кож(ен|ного|ну|ній|ий|а|е|і)|щодня|щопонеділ|щовівтор|щосеред|щочетвер|щоп'ятн|щосубот|щонеділ|число|місяця/.test(
-          message,
+          messageText,
         )
 
       if (isRepeating) {
@@ -228,7 +470,7 @@ bot.on('text', ctx => {
 
         let timeMatch = null
         for (const pattern of timePatterns) {
-          timeMatch = message.match(pattern)
+          timeMatch = messageText.match(pattern)
           if (timeMatch) break
         }
 
@@ -242,7 +484,7 @@ bot.on('text', ctx => {
             }
 
             // Корекція часу для "вечора"
-            if (message.includes('вечора') && hour < 12) {
+            if (messageText.includes('вечора') && hour < 12) {
               hour += 12
             }
           }
@@ -268,7 +510,7 @@ bot.on('text', ctx => {
         ]
 
         for (const pattern of monthlyPatterns) {
-          const match = message.match(pattern)
+          const match = messageText.match(pattern)
           if (match) {
             dayOfMonth = parseInt(match[1])
             if (dayOfMonth >= 1 && dayOfMonth <= 31) {
@@ -297,7 +539,7 @@ bot.on('text', ctx => {
           ]
 
           for (const d of days) {
-            if (d.re.test(message)) {
+            if (d.re.test(messageText)) {
               dayOfWeek = d.cron
               break
             }
@@ -312,14 +554,14 @@ bot.on('text', ctx => {
 
       // Якщо не повторюване, пробуємо парсити як разове
       if (!cron) {
-        when = chrono.uk.parseDate(message)
+        when = chrono.uk.parseDate(messageText)
         if (when && when <= new Date()) {
           return ctx.reply('❌ Неможна створити нагадування на минулий час')
         }
       }
 
       if (cron || when) {
-        const taskText = ctx.message.text.replace(rxp, '').trim()
+        const taskText = message.replace(rxp, '').trim()
         if (!taskText) {
           return ctx.reply('❌ Опишіть, про що нагадати')
         }
